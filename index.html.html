@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aashupie's Interactive World v3</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #020207; font-family: 'Segoe UI', sans-serif; }
+        #input-video { position: absolute; top: 0; left: 0; opacity: 0; pointer-events: none; }
+        #output-canvas { display: block; position: absolute; top: 0; left: 0; z-index: 1; }
+        #ui-container {
+            position: absolute; top: 20px; left: 20px; z-index: 10;
+            background: rgba(15, 15, 25, 0.8); backdrop-filter: blur(10px);
+            padding: 20px; border-radius: 16px; border: 1px solid rgba(255, 105, 180, 0.3);
+            color: #ffb7c5; pointer-events: none;
+        }
+        #current-shape { color: #ff69b4; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; }
+        #loading-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: #020207; z-index: 100; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; color: #ff69b4;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading-screen"><div id="loading-text">Creating the Magic...</div></div>
+
+    <div id="ui-container">
+        <div style="font-size: 1.2em; font-weight: bold; margin-bottom: 5px;">✨ Aashupie's Particle Gift</div>
+        <div>Shape: <span id="current-shape">Initializing...</span></div>
+    </div>
+
+    <video id="input-video"></video>
+    <canvas id="output-canvas"></canvas>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+        import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+
+        let scene, camera, renderer, clock, particleSystem;
+        const PARTICLE_COUNT = 25000; 
+        
+        let handPosition = new THREE.Vector3(0, 0, 0), pinchScale = 1.0;
+        let cycleTimer = 0, currentTemplateIndex = 0, templates = [];
+        let lerpSpeed = 0.06;
+        const fontVertices = { birthday: null, iloveyou: null };
+
+        init();
+        loadAssets();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x020207, 0.015);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.z = 22;
+
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('output-canvas'), antialias: false, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            clock = new THREE.Clock();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        async function loadAssets() {
+            const loader = new FontLoader();
+            loader.load('https://unpkg.com/three@0.160.0/examples/fonts/helvetiker_bold.typeface.json', (font) => {
+                const bGeo = new TextGeometry('Happy Birthday\nAashupie!', { font, size: 1.4, height: 0.1, curveSegments: 3 });
+                bGeo.center();
+                fontVertices.birthday = new THREE.WireframeGeometry(bGeo).attributes.position.array;
+
+                const lGeo = new TextGeometry('I LOVE YOU!!', { font, size: 1.8, height: 0.1, curveSegments: 3 });
+                lGeo.center();
+                fontVertices.iloveyou = new THREE.WireframeGeometry(lGeo).attributes.position.array;
+
+                setupParticles();
+                defineTemplates();
+                setupMediaPipe();
+                document.getElementById('loading-screen').style.display = 'none';
+                animate();
+            });
+        }
+
+        function setupParticles() {
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(PARTICLE_COUNT * 3);
+            const tarPos = new Float32Array(PARTICLE_COUNT * 3);
+            const col = new Float32Array(PARTICLE_COUNT * 3);
+            const tarCol = new Float32Array(PARTICLE_COUNT * 3);
+            const phases = new Float32Array(PARTICLE_COUNT);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                phases[i] = Math.random() * Math.PI * 2;
+                for(let j=0; j<3; j++) pos[i*3+j] = (Math.random()-0.5)*40;
+            }
+
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('targetPosition', new THREE.BufferAttribute(tarPos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+            geo.setAttribute('targetColor', new THREE.BufferAttribute(tarCol, 3));
+            geo.setAttribute('sizePhase', new THREE.BufferAttribute(phases, 1));
+
+            const mat = new THREE.PointsMaterial({
+                size: 0.28, vertexColors: true, transparent: true, opacity: 0.8,
+                blending: THREE.AdditiveBlending, depthWrite: false, map: createTexture()
+            });
+
+            particleSystem = new THREE.Points(geo, mat);
+            scene.add(particleSystem);
+        }
+
+        function createTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            grad.addColorStop(0, 'white'); grad.addColorStop(0.4, 'rgba(255,255,255,0.4)'); grad.addColorStop(1, 'black');
+            ctx.fillStyle = grad; ctx.fillRect(0, 0, 64, 64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        function defineTemplates() {
+            templates.push({ name: "Milky Way Galaxy", type: "env", gen: genGalaxy });
+            templates.push({ name: "Valentine Heart", type: "shape", gen: genValentine });
+            templates.push({ name: "The Beating Heart", type: "beat", gen: genHumanHeart });
+            templates.push({ name: "I LOVE YOU!!", type: "text", gen: (p, c) => genText(p, c, fontVertices.iloveyou, new THREE.Color(0xff2266)) });
+            templates.push({ name: "Happy Birthday Aashupie!", type: "text", gen: genBirthday });
+            applyTemplate(0);
+        }
+
+        function applyTemplate(idx) {
+            currentTemplateIndex = idx;
+            document.getElementById('current-shape').innerText = templates[idx].name;
+            templates[idx].gen(particleSystem.geometry.attributes.targetPosition.array, particleSystem.geometry.attributes.targetColor.array);
+            particleSystem.geometry.attributes.targetPosition.needsUpdate = true;
+            particleSystem.geometry.attributes.targetColor.needsUpdate = true;
+            lerpSpeed = 0.2; // Transition burst
+        }
+
+        // --- GENERATORS ---
+        function genGalaxy(pos, col) {
+            const color = new THREE.Color();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const r = Math.pow(Math.random(), 0.8) * 15;
+                const angle = r * 0.7 + (i % 3) * (Math.PI * 2 / 3);
+                pos[i*3] = Math.cos(angle) * r; pos[i*3+1] = (Math.random()-0.5)*3; pos[i*3+2] = Math.sin(angle) * r;
+                color.setHSL(0.6 + Math.random()*0.1, 0.8, 0.5);
+                col[i*3] = color.r; col[i*3+1] = color.g; col[i*3+2] = color.b;
+            }
+        }
+
+        function genHumanHeart(pos, col) {
+            const color = new THREE.Color();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const u = Math.random(), v = Math.random();
+                const theta = u * Math.PI * 2, phi = Math.acos(2 * v - 1);
+                let r = 3.5 * (1.1 - Math.cos(phi) * 0.35); // Pointy bottom
+                r += Math.sin(theta * 2) * 0.5; // Two lobes
+                pos[i*3] = r * Math.sin(phi) * Math.cos(theta) * 0.8;
+                pos[i*3+1] = r * Math.cos(phi) + 2;
+                pos[i*3+2] = r * Math.sin(phi) * Math.sin(theta) * 0.8;
+                color.setRGB(0.6 + Math.random()*0.4, 0.1, 0.2);
+                col[i*3] = color.r; col[i*3+1] = color.g; col[i*3+2] = color.b;
+            }
+        }
+
+        function genValentine(pos, col) {
+            const color = new THREE.Color();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const t = Math.random() * Math.PI * 2;
+                pos[i*3] = 16 * Math.pow(Math.sin(t), 3) * 0.35;
+                pos[i*3+1] = (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * 0.35 + 2;
+                pos[i*3+2] = (Math.random()-0.5) * 2;
+                color.setHSL(0.95, 0.9, 0.5);
+                col[i*3] = color.r; col[i*3+1] = color.g; col[i*3+2] = color.b;
+            }
+        }
+
+        function genText(pos, col, verts, baseCol) {
+            const color = new THREE.Color();
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = (i % (verts.length / 3)) * 3;
+                pos[i*3] = verts[idx] * 2.2; pos[i*3+1] = verts[idx+1] * 2.2; pos[i*3+2] = verts[idx+2] * 2.2;
+                color.copy(baseCol).multiplyScalar(0.7 + Math.random()*0.6);
+                col[i*3] = color.r; col[i*3+1] = color.g; col[i*3+2] = color.b;
+            }
+        }
+
+        function genBirthday(pos, col) {
+            const color = new THREE.Color();
+            const verts = fontVertices.birthday;
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const idx = (i % (verts.length / 3)) * 3;
+                pos[i*3] = verts[idx] * 2; pos[i*3+1] = verts[idx+1] * 2; pos[i*3+2] = verts[idx+2] * 2;
+                if (Math.random() > 0.5) color.setRGB(0.7, 0.45, 0.2); else color.setRGB(1.0, 0.65, 0.75);
+                col[i*3] = color.r; col[i*3+1] = color.g; col[i*3+2] = color.b;
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            cycleTimer += dt;
+            if (cycleTimer >= 6) { cycleTimer = 0; applyTemplate((currentTemplateIndex + 1) % templates.length); }
+
+            lerpSpeed += (0.06 - lerpSpeed) * 0.05;
+            const current = templates[currentTemplateIndex];
+
+            // --- READABILITY & VIEW ADJUSTMENT ---
+            // If it's a text template, move camera back and stop rotation for readability
+            const targetZ = current.type === "text" ? 28 : 22;
+            camera.position.z += (targetZ - camera.position.z) * 0.05;
+            const rotationSpeed = current.type === "text" ? 0.01 : 0.08;
+            particleSystem.rotation.y += rotationSpeed * dt;
+
+            const p = particleSystem.geometry.attributes.position.array;
+            const tp = particleSystem.geometry.attributes.targetPosition.array;
+            const c = particleSystem.geometry.attributes.color.array;
+            const tc = particleSystem.geometry.attributes.targetColor.array;
+            const ph = particleSystem.geometry.attributes.sizePhase.array;
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                let scale = THREE.MathUtils.clamp(THREE.MathUtils.mapLinear(pinchScale, 0.02, 0.15, 0.5, 3), 0.4, 4);
+                
+                // Beating effect logic
+                if (current.type === "beat") {
+                    const beat = Math.pow(Math.sin(time * 4), 10) * 0.25;
+                    scale *= (1.0 + beat);
+                }
+                
+                const breathing = 1 + Math.sin(time * 2 + ph[i]) * 0.03;
+                const finalScale = scale * breathing;
+
+                p[i3] += (tp[i3] * finalScale + handPosition.x - p[i3]) * lerpSpeed;
+                p[i3+1] += (tp[i3+1] * finalScale + handPosition.y - p[i3+1]) * lerpSpeed;
+                p[i3+2] += (tp[i3+2] * finalScale + handPosition.z - p[i3+2]) * lerpSpeed;
+
+                c[i3] += (tc[i3] - c[i3]) * 0.04;
+                c[i3+1] += (tc[i3+1] - c[i3+1]) * 0.04;
+                c[i3+2] += (tc[i3+2] - c[i3+2]) * 0.04;
+            }
+
+            particleSystem.geometry.attributes.position.needsUpdate = true;
+            particleSystem.geometry.attributes.color.needsUpdate = true;
+            renderer.render(scene, camera);
+        }
+
+        function setupMediaPipe() {
+            const video = document.getElementById('input-video');
+            const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+            hands.onResults(res => {
+                if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+                    const lm = res.multiHandLandmarks[0];
+                    handPosition.lerp(new THREE.Vector3((lm[9].x - 0.5) * -30, (lm[9].y - 0.5) * -20, THREE.MathUtils.mapLinear(Math.abs(lm[0].x - lm[9].x), 0.1, 0.3, 10, -5)), 0.1);
+                    pinchScale += (Math.sqrt((lm[4].x - lm[8].x)**2 + (lm[4].y - lm[8].y)**2) - pinchScale) * 0.2;
+                } else {
+                    handPosition.lerp(new THREE.Vector3(0,0,0), 0.02);
+                    pinchScale += (0.08 - pinchScale) * 0.05;
+                }
+            });
+            new Camera(video, { onFrame: async () => await hands.send({image: video}), width: 640, height: 480 }).start();
+        }
+    </script>
+</body>
+</html>
